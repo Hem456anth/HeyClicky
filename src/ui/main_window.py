@@ -200,7 +200,10 @@ class MainPanel(QWidget):
             f"padding: 2px 12px; font-weight: 600;"
         )
         # Clear stale errors as soon as the manager moves out of ERROR.
-        if state != CompanionState.ERROR and self.error_banner.isVisible():
+        # `getattr` because this slot is called during _build_ui to set the
+        # initial chip color BEFORE the error banner widget exists.
+        banner = getattr(self, "error_banner", None)
+        if state != CompanionState.ERROR and banner is not None and banner.isVisible():
             self._clear_error_banner()
         # Transient cursor mode: collapse the panel as soon as we start
         # listening; reappearance is manual (tray click) so the user has
