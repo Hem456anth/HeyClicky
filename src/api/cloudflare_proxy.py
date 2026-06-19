@@ -55,7 +55,14 @@ class CloudflareProxy:
     def chat(self, payload: dict[str, Any], stream: bool = False) -> requests.Response:
         url = f"{self.base_url}{WORKER_CHAT_PATH}"
         log.debug("POST %s stream=%s", url, stream)
-        return self._session.post(url, json=payload, stream=stream, timeout=self.timeout)
+        response = self._session.post(url, json=payload, stream=stream, timeout=self.timeout)
+        # Surface the upstream error body so the user sees the real problem
+        # (e.g. "Your credit balance is too low" from Anthropic) instead of
+        # an opaque "400 Bad Request". Skip for streaming responses — the
+        # body iterator is the caller's responsibility there.
+        if not stream and not response.ok:
+            raise _build_http_error("/chat", response)
+        return response
 
     def chat_stream(self, payload: dict[str, Any]) -> Iterator[SSEEvent]:
         """Yield parsed `SSEEvent`s from the Worker's `/chat` SSE response.
@@ -67,7 +74,8 @@ class CloudflareProxy:
         keepalives.
         """
         response = self.chat({**payload, "stream": True}, stream=True)
-        response.raise_for_status()
+        if not response.ok:
+            raise _build_http_error("/chat", response)
 
         current_event = "message"
         data_lines: list[str] = []
@@ -119,7 +127,8 @@ class CloudflareProxy:
             json={"text": text},
             timeout=self.timeout,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            raise _build_http_error("/tts", resp)
         return resp.content
 
     # ---- /transcribe-token ----
@@ -132,9 +141,29 @@ class CloudflareProxy:
         """
         url = f"{self.base_url}{WORKER_TRANSCRIBE_TOKEN_PATH}"
         resp = self._session.post(url, json={}, timeout=self.timeout)
-        resp.raise_for_status()
+        if not resp.ok:
+            raise _build_http_error("/transcribe-token", resp)
         data = resp.json()
         return data.get("token") or data.get("temp_token") or ""
 
     def close(self) -> None:
         self._session.close()
+
+
+def _build_http_error(route: str, response: requests.Response) -> RuntimeError:
+    """Compose a friendly exception including the upstream response body.
+
+    The Worker passes through upstream API errors verbatim; their bodies
+    contain the actionable diagnostic (e.g. "Your credit balance is too
+    low" from Anthropic, "Invalid API key" from AssemblyAI). Without
+    surfacing the body, the user only sees the HTTP status code and has
+    to curl the Worker themselves to figure out what went wrong.
+    """
+    body_preview = (response.text or "").strip()
+    if len(body_preview) > 500:
+        body_preview = body_preview[:500] + "..."
+    if not body_preview:
+        body_preview = "(empty response body)"
+    return RuntimeError(
+        f"Worker {route} returned {response.status_code}: {body_preview}"
+    )
