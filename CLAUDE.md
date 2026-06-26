@@ -209,7 +209,7 @@ heybuddy/
 │       ├── constants.py                   ← APP_NAME, paths, POINT regex, system prompt
 │       ├── logger.py                      ← rotating file + console
 │       ├── permissions.py                 ← mic + Worker diagnostics for Settings
-│       └── win32.py                       ← ALL ctypes/Win32 + winreg autostart
+│       └── win32.py                       ← ALL ctypes/Win32 + winreg autostart + DWM blur-behind/Mica/Acrylic
 ```
 
 ---

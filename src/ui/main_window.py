@@ -50,6 +50,7 @@ from ..core.companion_manager import CompanionManager, CompanionState
 from ..models.config import AppConfig
 from ..models.message import Message, Role
 from ..utils.logger import get_logger
+from ..utils.win32 import apply_blur_behind
 from . import theme
 from .settings_panel import SettingsPanel
 
@@ -144,6 +145,14 @@ class MainPanel(QWidget):
         self.config = config
         self.manager = manager
         self.hotkey_monitor = None  # wired by main.py post-construction
+        # Remembered so showEvent can re-call `_apply_theme(...)` with
+        # `dwm_blur_active=True` once the HWND exists and we know whether
+        # DWM accepted a backdrop.
+        self._current_theme_name = config.ui.theme
+        self._dwm_blur_active = False
+        # Set True the first time we try `apply_blur_behind`; prevents
+        # re-attempting (and re-styling) on every show/hide cycle.
+        self._dwm_backdrop_attempted = False
 
         # Include the shadow margin in the overall window size so the
         # visible chrome stays the configured panel_width / panel_height.
@@ -280,18 +289,33 @@ class MainPanel(QWidget):
     def _apply_theme(self, theme_name: str) -> None:
         """Apply the dark stylesheet using `theme.py` tokens.
 
-        Cycle 2 scope: only the panel/chrome chrome rule consumes theme
-        tokens — that's what this cycle's task ("rounded corners") calls
-        for. The other rules (buttons, bubbles, etc.) keep their existing
-        hex literals; later cycles ("Hover states + pointer cursor on all
-        buttons" etc.) migrate them.
+        Cycle 2 introduced the panel/chrome split; cycle 3 adds the
+        DWM-translucent variant of the chrome background. When DWM has
+        composited a blur/Mica/Acrylic backdrop, the chrome switches to a
+        semi-transparent fill (`rgba(BG_PANEL, BG_PANEL_BLUR_ALPHA)`) so
+        the desktop tint reads through. Without DWM, the chrome stays
+        fully opaque or it would look like floating text on an empty
+        invisible window.
+
+        Other rules (buttons, bubbles, etc.) keep their existing hex
+        literals; later cycles ("Hover states", etc.) migrate them.
         """
+        # Remember the choice so showEvent can re-call us after the DWM
+        # attempt without the caller having to thread the flag through.
+        self._current_theme_name = theme_name
+
         if theme_name == "dark":
+            if self._dwm_blur_active:
+                panel_bg = theme.rgba(
+                    theme.Color.BG_PANEL, theme.Color.BG_PANEL_BLUR_ALPHA,
+                )
+            else:
+                panel_bg = theme.Color.BG_PANEL
             self.setStyleSheet(
                 f"""
                 #MainPanel {{ background-color: transparent; }}
                 #PanelChrome {{
-                    background-color: {theme.Color.BG_PANEL};
+                    background-color: {panel_bg};
                     border: 1px solid {theme.Color.BG_BORDER};
                     border-radius: {theme.Radius.PANEL}px;
                     color: {theme.Color.TEXT_PRIMARY};
@@ -428,10 +452,11 @@ class MainPanel(QWidget):
 
     # ---- position persistence ----
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
-        """Restore the saved position the first time the window is shown.
+        """One-time setup that requires the native HWND to exist.
 
-        We can't do this in __init__ because the window has no native handle
-        yet and `move()` calls would be ignored on some Windows builds.
+        We can't do these in __init__ because the window has no native handle
+        yet — `move()` calls would be ignored on some Windows builds, and
+        DWM APIs need a real HWND to attach to.
         """
         super().showEvent(event)
         if not self._position_save_armed:
@@ -439,6 +464,19 @@ class MainPanel(QWidget):
             # Arm AFTER the restore so the move() above doesn't trigger a
             # save with stale data.
             self._position_save_armed = True
+        if not self._dwm_backdrop_attempted:
+            self._dwm_backdrop_attempted = True
+            try:
+                effect = apply_blur_behind(int(self.winId()))
+            except Exception:
+                log.exception("apply_blur_behind raised")
+                effect = "none"
+            # Only flip the chrome to translucent if a backdrop was actually
+            # applied. Otherwise the panel would look like floating widgets
+            # on top of the desktop with no slab behind them.
+            if effect != "none":
+                self._dwm_blur_active = True
+                self._apply_theme(self._current_theme_name)
 
     def moveEvent(self, event: QMoveEvent) -> None:  # type: ignore[override]
         """Debounce position saves during a drag."""

@@ -52,6 +52,13 @@ try:
     _shcore = ctypes.windll.shcore
 except OSError:  # pragma: no cover — Windows 7 without KB; we don't ship there
     _shcore = None
+# Desktop Window Manager — present on every supported Windows (Vista+).
+# Wrapped in try/except so an ancient host without dwmapi merely loses the
+# blur-behind backdrop instead of crashing at import.
+try:
+    _dwmapi = ctypes.windll.dwmapi
+except OSError:  # pragma: no cover
+    _dwmapi = None
 
 
 # ---------------------------------------------------------------------------
@@ -655,3 +662,143 @@ def autostart_command_for_current_process() -> str:
 # Late import to avoid a circular dependency on constants at module load.
 # `constants.PROJECT_ROOT` doesn't import this module so this is one-way safe.
 from .constants import PROJECT_ROOT as PROJECT_ROOT_FOR_AUTOSTART  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# DWM blur-behind / Mica / Acrylic backdrop
+#
+# The frameless panel is drawn over a transparent root QWidget so a drop
+# shadow can render. With nothing behind it, the chrome looks like it's
+# floating in space. DWM can composite a blurred view of whatever the user
+# has on their desktop behind our window — the classic "translucent panel"
+# look modern Windows apps use.
+#
+# Three flavors, in priority order (most modern first):
+#
+# 1. `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW)`
+#    Windows 11 22H2+. Acrylic — the bright, frosted-glass look. Best
+#    quality, modest CPU/GPU cost. Returns non-zero on older builds.
+# 2. `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)`
+#    Windows 11 22H2+. Mica — the more subtle desktop-tint look. Used as a
+#    secondary attempt if Acrylic isn't available.
+# 3. `DwmEnableBlurBehindWindow` — Windows 10+ (in practice every Win10
+#    install). Coarser gaussian blur, no per-pixel tint. The fallback that
+#    actually fires on most Win10 hosts.
+#
+# If all three fail (e.g. very old Windows, DWM disabled, classic theme),
+# the caller is told `"none"` and should leave the panel chrome opaque so
+# the dark slab still reads correctly.
+# ---------------------------------------------------------------------------
+
+# DwmSetWindowAttribute attribute IDs.
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_SYSTEMBACKDROP_TYPE = 38
+
+# Values for DWMWA_SYSTEMBACKDROP_TYPE.
+DWMSBT_AUTO = 0
+DWMSBT_NONE = 1
+DWMSBT_MAINWINDOW = 2          # Mica
+DWMSBT_TRANSIENTWINDOW = 3     # Acrylic
+DWMSBT_TABBEDWINDOW = 4        # Tabbed Mica
+
+# Flags for DWM_BLURBEHIND.dwFlags.
+DWM_BB_ENABLE = 0x01
+DWM_BB_BLURREGION = 0x02
+DWM_BB_TRANSITIONONMAXIMIZED = 0x04
+
+
+class _DWM_BLURBEHIND(ctypes.Structure):
+    _fields_ = [
+        ("dwFlags", wintypes.DWORD),
+        ("fEnable", wintypes.BOOL),
+        ("hRgnBlur", wintypes.HRGN),
+        ("fTransitionOnMaximized", wintypes.BOOL),
+    ]
+
+
+# Declare argtypes so the HWND survives x64 (same lesson as the keyboard hook).
+if _dwmapi is not None:
+    _dwmapi.DwmEnableBlurBehindWindow.argtypes = (
+        wintypes.HWND,
+        ctypes.POINTER(_DWM_BLURBEHIND),
+    )
+    # HRESULT is a signed 32-bit; c_long is the correct ctypes mapping.
+    _dwmapi.DwmEnableBlurBehindWindow.restype = ctypes.c_long
+    _dwmapi.DwmSetWindowAttribute.argtypes = (
+        wintypes.HWND,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+
+def apply_blur_behind(hwnd: int) -> str:
+    """Apply the best available DWM backdrop to `hwnd`. Return its name.
+
+    The returned string is one of:
+
+    * `"acrylic"`      — Win 11 22H2+ system backdrop
+    * `"mica"`         — Win 11 22H2+ system backdrop (fallback within modern API)
+    * `"blur-behind"`  — Win 10 legacy blur
+    * `"none"`         — nothing applied (very old Windows, classic theme,
+                         DWM disabled, or call failed)
+
+    Callers should switch their chrome to a translucent background only when
+    the return value is not `"none"`. Otherwise the dark slab disappears
+    against the desktop because nothing is being composited behind it.
+    """
+    if _dwmapi is None:
+        return "none"
+
+    hwnd_handle = wintypes.HWND(hwnd)
+
+    # Tier 1: modern Acrylic via DwmSetWindowAttribute. Returns S_OK (0)
+    # on success; non-zero on older builds where the attribute is unknown.
+    try:
+        backdrop_value = ctypes.c_int(DWMSBT_TRANSIENTWINDOW)
+        rc = _dwmapi.DwmSetWindowAttribute(
+            hwnd_handle,
+            wintypes.DWORD(DWMWA_SYSTEMBACKDROP_TYPE),
+            ctypes.byref(backdrop_value),
+            wintypes.DWORD(ctypes.sizeof(backdrop_value)),
+        )
+        if rc == 0:
+            log.info("DWM backdrop: Acrylic applied to hwnd=%#x", hwnd)
+            return "acrylic"
+    except OSError:
+        log.exception("DwmSetWindowAttribute(Acrylic) raised")
+
+    # Tier 2: Mica fallback within the same modern API. Same Windows 11
+    # build requirement, but worth trying in case Acrylic was rejected for
+    # window-style reasons but Mica accepted.
+    try:
+        backdrop_value = ctypes.c_int(DWMSBT_MAINWINDOW)
+        rc = _dwmapi.DwmSetWindowAttribute(
+            hwnd_handle,
+            wintypes.DWORD(DWMWA_SYSTEMBACKDROP_TYPE),
+            ctypes.byref(backdrop_value),
+            wintypes.DWORD(ctypes.sizeof(backdrop_value)),
+        )
+        if rc == 0:
+            log.info("DWM backdrop: Mica applied to hwnd=%#x", hwnd)
+            return "mica"
+    except OSError:
+        log.exception("DwmSetWindowAttribute(Mica) raised")
+
+    # Tier 3: legacy DwmEnableBlurBehindWindow. Works on all modern Win10.
+    try:
+        bb = _DWM_BLURBEHIND()
+        bb.dwFlags = DWM_BB_ENABLE
+        bb.fEnable = True
+        bb.hRgnBlur = None
+        bb.fTransitionOnMaximized = False
+        rc = _dwmapi.DwmEnableBlurBehindWindow(hwnd_handle, ctypes.byref(bb))
+        if rc == 0:
+            log.info("DWM backdrop: legacy blur-behind applied to hwnd=%#x", hwnd)
+            return "blur-behind"
+    except OSError:
+        log.exception("DwmEnableBlurBehindWindow raised")
+
+    log.info("DWM backdrop: none available, chrome stays opaque")
+    return "none"

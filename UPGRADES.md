@@ -8,7 +8,7 @@ commit updates `CLAUDE.md`.
 ## GUI
 - [x] ui/theme.py: color, radius, spacing tokens
 - [x] Frameless panel: rounded corners, shadow, draggable, remembers position
-- [ ] DWM blur-behind translucent background
+- [x] DWM blur-behind translucent background
 - [ ] Status row bound to state (dot + label + pulse)
 - [ ] Mic level waveform meter while listening
 - [ ] Streaming reply area fills token-by-token

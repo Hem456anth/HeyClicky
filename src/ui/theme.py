@@ -39,6 +39,11 @@ class Color:
     # ----- backgrounds -----
     # Frameless panel background (the dark slab the chat lives on).
     BG_PANEL = "#1a1d24"
+    # Alpha (0-255) used for BG_PANEL when DWM blur-behind/Mica/Acrylic is
+    # composited behind the window. Used as `rgba(BG_PANEL, BG_PANEL_BLUR_ALPHA)`.
+    # On builds without DWM support the chrome stays fully opaque, so this
+    # constant is irrelevant there.
+    BG_PANEL_BLUR_ALPHA = 215
     # Inset surface: input fields, code blocks, anything that should look
     # "lower" than the panel itself.
     BG_INSET = "#0f1218"
