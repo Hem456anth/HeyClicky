@@ -106,6 +106,9 @@ class Radius:
     PILL = 12
     # Frameless panel itself.
     PANEL = 12
+    # Status-row indicator dot (circle radius, not corner radius). Lives
+    # here so the dot stays visually balanced with other UI radii.
+    STATUS_DOT = 6
 
 
 class Spacing:

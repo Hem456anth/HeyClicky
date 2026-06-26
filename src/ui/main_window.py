@@ -25,12 +25,22 @@ has somewhere to render.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QRect,
+    Qt,
+    QTimer,
+    pyqtProperty,
+    pyqtSlot,
+)
 from PyQt6.QtGui import (
     QColor,
     QFont,
     QMouseEvent,
     QMoveEvent,
+    QPainter,
     QShowEvent,
 )
 from PyQt6.QtWidgets import (
@@ -111,6 +121,139 @@ class _DraggableTitleBar(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         self._drag_grab_offset = None
         event.accept()
+
+
+# Active states — the dot pulses while the manager is doing work. IDLE is
+# the calm steady state; ERROR is steady on purpose (a pulsing error reads
+# as "still happening" — we want it to look settled until the user acts).
+_PULSING_STATES = frozenset({
+    CompanionState.LISTENING,
+    CompanionState.PROCESSING,
+    CompanionState.RESPONDING,
+})
+
+
+class _StatusRow(QWidget):
+    """Colored dot + label + halo pulse animation.
+
+    Drawn entirely in `paintEvent` rather than composed from child widgets
+    so the dot and label stay perfectly vertically aligned and the halo
+    isn't clipped by a label widget that doesn't know about it. The whole
+    row is one QWidget with one paint pass.
+
+    The pulse is a 1.2s sine-ease loop on the halo's alpha. The label
+    color does NOT pulse — only the halo — so the text stays readable
+    while the indicator animates.
+    """
+
+    # Animation timing (not a design token — purely an implementation
+    # parameter of this widget's motion).
+    PULSE_PERIOD_MS = 1_200
+    PULSE_MIN_ALPHA = 0.25     # halo dimmest point in the loop
+    PULSE_MAX_ALPHA = 0.85     # halo brightest point
+
+    # Layout
+    HALO_MULTIPLIER = 2.0      # halo radius relative to dot radius
+    LABEL_GAP = 10             # px between dot center+radius and the label
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._dot_color = QColor(theme.Color.STATE_IDLE)
+        self._label_text = "Idle"
+        # Halo opacity drives the pulse; starts fully dim because IDLE
+        # starts un-pulsed (animation is stopped on IDLE).
+        self._halo_alpha = self.PULSE_MIN_ALPHA
+
+        self._pulse_animation = QPropertyAnimation(self, b"haloAlpha", self)
+        self._pulse_animation.setDuration(self.PULSE_PERIOD_MS)
+        self._pulse_animation.setStartValue(self.PULSE_MIN_ALPHA)
+        self._pulse_animation.setKeyValueAt(0.5, self.PULSE_MAX_ALPHA)
+        self._pulse_animation.setEndValue(self.PULSE_MIN_ALPHA)
+        self._pulse_animation.setLoopCount(-1)
+        self._pulse_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        # Reserve enough vertical room for the largest halo radius so the
+        # animation doesn't overflow the row.
+        row_height = int(
+            theme.Radius.STATUS_DOT * self.HALO_MULTIPLIER * 2
+            + theme.Spacing.XS * 2
+        )
+        self.setFixedHeight(row_height)
+
+    # ---- Qt property fed by QPropertyAnimation ----
+    def get_halo_alpha(self) -> float:
+        return self._halo_alpha
+
+    def set_halo_alpha(self, value: float) -> None:
+        self._halo_alpha = value
+        self.update()
+
+    haloAlpha = pyqtProperty(
+        float, fget=get_halo_alpha, fset=set_halo_alpha,
+    )
+
+    # ---- public API ----
+    def set_state(self, label: str, color_hex: str, should_pulse: bool) -> None:
+        """Update the dot color, label, and pulse loop.
+
+        Called from `MainPanel._set_state_chip` on every state transition.
+        Stopping the animation when not pulsing matters — Qt keeps
+        consuming a paint timer slot while it's running, even if visually
+        nothing's changing.
+        """
+        self._dot_color = QColor(color_hex)
+        self._label_text = label
+        if should_pulse:
+            if self._pulse_animation.state() != QPropertyAnimation.State.Running:
+                self._pulse_animation.start()
+        else:
+            self._pulse_animation.stop()
+            # Park the halo at a dim steady value so the dot reads as a
+            # solid indicator rather than mid-animation freeze.
+            self._halo_alpha = self.PULSE_MIN_ALPHA
+        self.update()
+
+    # ---- paint ----
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        dot_radius = theme.Radius.STATUS_DOT
+        halo_radius = dot_radius * self.HALO_MULTIPLIER
+        # Center the dot vertically; left-align with a small padding so it
+        # doesn't kiss the panel's left edge.
+        dot_cx = int(halo_radius + theme.Spacing.XS)
+        dot_cy = self.height() // 2
+
+        # Halo (drawn first so the solid dot sits on top of it).
+        halo_color = QColor(self._dot_color)
+        halo_color.setAlphaF(self._halo_alpha)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(halo_color)
+        painter.drawEllipse(
+            QPoint(dot_cx, dot_cy), int(halo_radius), int(halo_radius),
+        )
+
+        # Solid dot.
+        painter.setBrush(self._dot_color)
+        painter.drawEllipse(
+            QPoint(dot_cx, dot_cy), dot_radius, dot_radius,
+        )
+
+        # Label.
+        label_font = QFont(
+            theme.Typography.FONT_FAMILY_UI,
+            theme.Typography.SIZE_BODY,
+            theme.Typography.WEIGHT_DEMI,
+        )
+        painter.setFont(label_font)
+        painter.setPen(QColor(theme.Color.TEXT_PRIMARY))
+        label_x = dot_cx + dot_radius + self.LABEL_GAP
+        painter.drawText(
+            QRect(label_x, 0, self.width() - label_x, self.height()),
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            self._label_text,
+        )
 
 
 class MainPanel(QWidget):
@@ -240,13 +383,10 @@ class MainPanel(QWidget):
         title_bar_layout.addWidget(self.close_btn)
         root.addWidget(title_bar)
 
-        # ---- state chip ----
-        self.state_chip = QLabel("Idle")
-        self.state_chip.setObjectName("stateChip")
-        self.state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.state_chip.setFixedHeight(26)
+        # ---- status row (dot + label + pulse) ----
+        self.status_row = _StatusRow(self.chrome)
         self._set_state_chip(CompanionState.IDLE)
-        root.addWidget(self.state_chip)
+        root.addWidget(self.status_row)
 
         # ---- error banner ----
         self.error_banner = QLabel("")
@@ -327,8 +467,6 @@ class MainPanel(QWidget):
                 QPushButton {{ background:#2e90fa; border:none; border-radius:6px;
                               padding:6px 12px; color:white; font-weight:600; }}
                 QPushButton:hover {{ background:#1f7ad8; }}
-                QLabel#stateChip {{ border-radius: 12px; padding: 2px 12px;
-                                   color:white; font-weight:600; }}
                 QLabel.userBubble {{ background:#2e3a4f; padding:8px 10px;
                                     border-radius:10px; }}
                 QLabel.assistantBubble {{ background:#0f3a52; padding:8px 10px;
@@ -347,8 +485,6 @@ class MainPanel(QWidget):
                     border: 1px solid #d0d4dc;
                     border-radius: {theme.Radius.PANEL}px;
                 }}
-                QLabel#stateChip {{ border-radius: 12px; padding: 2px 12px;
-                                   color:white; font-weight:600; }}
                 """
             )
 
@@ -372,13 +508,13 @@ class MainPanel(QWidget):
 
     # ---- slots ----
     def _set_state_chip(self, state: CompanionState) -> None:
+        # Method name kept for back-compat with already-connected signals;
+        # the actual widget is now `_StatusRow`, not a chip.
         label, color = _STATE_LABELS.get(state, ("...", "#5c5f66"))
-        self.state_chip.setText(label)
-        self.state_chip.setStyleSheet(
-            f"background-color: {color}; "
-            f"border-radius: {theme.Radius.PILL}px; "
-            f"color: {theme.Color.TEXT_INVERTED}; "
-            f"padding: 2px 12px; font-weight: 600;"
+        self.status_row.set_state(
+            label=label,
+            color_hex=color,
+            should_pulse=state in _PULSING_STATES,
         )
         # Clear stale errors as soon as the manager moves out of ERROR.
         # `getattr` because this slot is called during _build_ui to set the
