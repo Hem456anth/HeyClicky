@@ -268,6 +268,17 @@ class CursorOverlay(QWidget):
         target_physical_x, target_physical_y = logical_to_physical_on_monitor(
             marker.x, marker.y, monitor,
         )
+        # Cycle-12 verification log. Lets operators confirm from
+        # logs/heybuddy.log that the bezier flight is consuming the
+        # right marker AND that the per-monitor DPI scale was applied.
+        # Format chosen for grep-friendliness: `POINT flight: ...`.
+        log.info(
+            "POINT flight: screen=%d logical=(%d,%d) "
+            "physical=(%d,%d) dpi=%.2fx label=%r",
+            monitor.index, marker.x, marker.y,
+            target_physical_x, target_physical_y,
+            monitor.dpi_scale, marker.label,
+        )
 
         # Convert physical desktop coords to widget-local coords. Start point
         # is the current physical cursor location so the dot "flies from the

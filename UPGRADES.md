@@ -19,7 +19,7 @@ commit updates `CLAUDE.md`.
 - [x] Overlay click-through + non-activating flags verified
 - [x] Glowing blue dot + halo + comet trail
 - [x] Idle breathing animation
-- [ ] Bezier-arc flight from POINT tags, ease-in-out
+- [x] Bezier-arc flight from POINT tags, ease-in-out
 - [ ] Per-monitor DPI coordinate mapping
 - [ ] Arrival ripple + label caption fade
 - [ ] Transient mode fade in/out
