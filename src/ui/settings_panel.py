@@ -22,8 +22,10 @@ from ..utils.permissions import check_microphone, ping_worker
 from ..utils.win32 import (
     HOTKEY_PRESETS,
     autostart_command_for_current_process,
+    chord_display_name,
     disable_autostart,
     enable_autostart,
+    format_vk_chord,
     is_autostart_enabled,
 )
 from . import theme
@@ -53,6 +55,110 @@ def _enumerate_input_devices() -> list[tuple[int, str]]:
         name = device.get("name") or f"device {index}"
         inputs.append((index, name))
     return inputs
+
+
+class _HotkeyCaptureDialog(QDialog):
+    """Modal that records a chord by listening to its own key events.
+
+    Open the dialog, hold whatever chord you want as a push-to-talk key
+    combo, then release ALL keys to commit. Esc cancels without saving.
+
+    Why Qt key events instead of a temporary LL hook: when this dialog
+    is the foreground window, Qt's keyPressEvent / keyReleaseEvent
+    receive every key — including modifier-only chords (Ctrl, Alt, Win)
+    — and `event.nativeVirtualKey()` returns the exact Win32 VK code
+    we need to round-trip through `format_vk_chord`. An LL hook would
+    also capture them but would conflict with the live push-to-talk
+    hook for the duration of the capture and adds threading complexity
+    for negligible UX gain (the user is staring at a modal anyway).
+
+    Auto-repeat events are filtered (a held key fires keyPressEvent
+    many times per second on Windows; without the filter we'd never
+    notice releases). The dialog tracks the highest cardinality set
+    seen during the session — that's the "peak" chord — so a fumbled
+    chord like "Ctrl, Ctrl+Alt, Ctrl" still records the larger set.
+    """
+
+    captured = pyqtSignal(tuple)  # tuple of VK ints, sorted ascending
+
+    def __init__(self, parent: QDialog | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Capture push-to-talk chord")
+        self.setMinimumWidth(340)
+        layout = QVBoxLayout(self)
+
+        instructions = QLabel(
+            "Press the keys you want to use as your push-to-talk chord, "
+            "then release them all to save.\n\n"
+            "Press Esc to cancel."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        # Live readout of the chord-so-far. Updated on every key event
+        # so the user sees what they're committing before they release.
+        self._live_label = QLabel("(no keys pressed)")
+        self._live_label.setStyleSheet(
+            f"color: {theme.Color.ACCENT}; font-weight: 600; padding: 6px 0px;"
+        )
+        layout.addWidget(self._live_label)
+
+        # Held = currently pressed (decreases on release).
+        # Peak  = largest held-set seen so far (only ever grows during
+        # this session; reset between dialog opens).
+        self._held_vks: set[int] = set()
+        self._peak_vks: set[int] = set()
+        self._captured_vks: tuple[int, ...] | None = None
+
+    @property
+    def captured_chord(self) -> tuple[int, ...] | None:
+        """The committed chord, or None if the user cancelled."""
+        return self._captured_vks
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            return
+        vk = int(event.nativeVirtualKey())
+        if vk == 0:
+            # Qt couldn't determine a native VK (rare; happens for some
+            # IME-composed keys). Skip — capturing a zero-VK would
+            # serialize to garbage.
+            return
+        self._held_vks.add(vk)
+        if len(self._held_vks) > len(self._peak_vks):
+            self._peak_vks = set(self._held_vks)
+        self._refresh_live_label()
+        event.accept()
+
+    def keyReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if event.isAutoRepeat():
+            return
+        vk = int(event.nativeVirtualKey())
+        if vk == 0:
+            return
+        self._held_vks.discard(vk)
+        # Chord commits when EVERY key has been released and the user
+        # actually pressed something. Empty peak means they hit Esc-only
+        # paths or zero-VK keys — nothing to save.
+        if not self._held_vks and self._peak_vks:
+            self._captured_vks = tuple(sorted(self._peak_vks))
+            self.captured.emit(self._captured_vks)
+            self.accept()
+        else:
+            self._refresh_live_label()
+        event.accept()
+
+    def _refresh_live_label(self) -> None:
+        if not self._peak_vks:
+            self._live_label.setText("(no keys pressed)")
+            return
+        # Preview using the same renderer the save path uses, so what
+        # the user sees here is what shows up in the dropdown after save.
+        serialized = format_vk_chord(tuple(sorted(self._peak_vks)))
+        self._live_label.setText(chord_display_name(serialized))
 
 
 class SettingsPanel(QDialog):
@@ -104,14 +210,38 @@ class SettingsPanel(QDialog):
         worker_row.addWidget(self.ping_btn)
         form.addRow("Worker URL", worker_row)
 
-        # ---- Hotkey preset ----
+        # ---- Hotkey preset + Capture button ----
         self.hotkey = QComboBox()
         for preset_name in HOTKEY_PRESETS.keys():
             self.hotkey.addItem(self.HOTKEY_LABELS.get(preset_name, preset_name), preset_name)
+        # If the user previously saved a custom "vk:..." chord, restore
+        # it as an extra dropdown item showing its friendly name.
+        # Otherwise findData below picks one of the preset rows.
+        if config.hotkey.startswith("vk:"):
+            self.hotkey.addItem(
+                f"Custom: {chord_display_name(config.hotkey)}",
+                config.hotkey,
+            )
         current_preset_index = self.hotkey.findData(config.hotkey)
         if current_preset_index >= 0:
             self.hotkey.setCurrentIndex(current_preset_index)
-        form.addRow("Push-to-talk", self.hotkey)
+
+        # "Capture" button opens the modal capture dialog. On success,
+        # the captured chord is inserted (or refreshed) as a single
+        # "Custom: ..." dropdown row and selected. The actual hot-swap
+        # of the live LowLevelKeyboardHook happens in _save (re-uses
+        # the existing hotkey_changed path).
+        self.hotkey_capture_btn = QPushButton("Capture")
+        self.hotkey_capture_btn.setToolTip(
+            "Press a key combination to use as the push-to-talk chord."
+        )
+        self.hotkey_capture_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hotkey_capture_btn.clicked.connect(self._open_hotkey_capture)
+
+        hotkey_row = QHBoxLayout()
+        hotkey_row.addWidget(self.hotkey, 1)
+        hotkey_row.addWidget(self.hotkey_capture_btn)
+        form.addRow("Push-to-talk", hotkey_row)
 
         # ---- Model ----
         self.model = QComboBox()
@@ -206,6 +336,39 @@ class SettingsPanel(QDialog):
         self._set_status("Capturing 0.4s of audio...", ok=True)
         result = check_microphone()
         self._set_status(f"{result.title}: {result.detail}", ok=result.ok)
+
+    def _open_hotkey_capture(self) -> None:
+        """Show the capture modal; on accept, install the captured chord.
+
+        The serialized "vk:..." string is added to the dropdown as a
+        "Custom: <display>" item (or refreshed if one was already
+        there) and selected. The hot-swap to the live LL hook waits
+        until the user clicks Save — same path as preset changes.
+        """
+        dialog = _HotkeyCaptureDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        captured = dialog.captured_chord
+        if not captured:
+            return
+        serialized = format_vk_chord(captured)
+        display = f"Custom: {chord_display_name(serialized)}"
+        # If we already added a "Custom: ..." row in __init__ from a
+        # previously-saved chord, replace it instead of stacking up
+        # multiple custom rows in the dropdown.
+        existing_custom_idx = -1
+        for i in range(self.hotkey.count()):
+            data = self.hotkey.itemData(i)
+            if isinstance(data, str) and data.startswith("vk:"):
+                existing_custom_idx = i
+                break
+        if existing_custom_idx >= 0:
+            self.hotkey.setItemText(existing_custom_idx, display)
+            self.hotkey.setItemData(existing_custom_idx, serialized)
+            self.hotkey.setCurrentIndex(existing_custom_idx)
+        else:
+            self.hotkey.addItem(display, serialized)
+            self.hotkey.setCurrentIndex(self.hotkey.count() - 1)
 
     def _set_status(self, message: str, ok: bool) -> None:
         color = "#9ee493" if ok else "#ff8787"

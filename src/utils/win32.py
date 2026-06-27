@@ -88,6 +88,11 @@ VK_RMENU = 0xA5                  # right Alt
 VK_LSHIFT = 0xA0
 VK_RSHIFT = 0xA1
 VK_SPACE = 0x20
+# Windows key (the "Logo" key). Captured-chord users sometimes bind to
+# this so we need a friendly name for it; not in HOTKEY_PRESETS because
+# Windows reserves many Win+X shortcuts already.
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 
 # Per-monitor DPI awareness contexts (SetProcessDpiAwarenessContext).
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
@@ -623,11 +628,92 @@ CTRL_ALT_CHORD = HOTKEY_PRESETS["ctrl+alt"]
 def resolve_hotkey_chord(name: str) -> tuple[tuple[int, ...], ...]:
     """Map a friendly hotkey name (`config.hotkey`) to a VK chord.
 
-    Unknown names fall back to Ctrl+Alt so the app stays usable even after a
-    bad settings.json edit. The settings panel only exposes preset names, so
-    in practice we never hit the fallback path through the UI.
+    Two name formats are accepted:
+
+    * Preset name (e.g. `"ctrl+alt"`, `"alt+space"`) — looked up in
+      `HOTKEY_PRESETS`. Each preset's groups merge OS-side L/R variants
+      (any Ctrl + any Alt).
+    * Custom serialized form `"vk:N,N,N"` produced by the Settings
+      dialog's Capture button. Each comma-separated VK becomes its own
+      required group — the user's captured chord is reproduced exactly,
+      no L/R merging.
+
+    Unknown names fall back to Ctrl+Alt so the app stays usable even after
+    a bad settings.json edit.
     """
-    return HOTKEY_PRESETS.get(name.strip().lower().replace(" ", ""), CTRL_ALT_CHORD)
+    normalized = name.strip().lower().replace(" ", "")
+    if normalized.startswith("vk:"):
+        return parse_vk_chord(normalized)
+    return HOTKEY_PRESETS.get(normalized, CTRL_ALT_CHORD)
+
+
+def parse_vk_chord(serialized: str) -> tuple[tuple[int, ...], ...]:
+    """Parse a `"vk:N,N,N"` string into the LL-hook chord-group format.
+
+    Each VK becomes its own group of one (every VK must be held), which
+    is the exact-match semantics a freshly-captured chord wants. Empty
+    payload or non-numeric tokens silently fall back to Ctrl+Alt — the
+    same defensive policy `resolve_hotkey_chord` uses for unknown
+    preset names.
+    """
+    payload = serialized[len("vk:"):]
+    vks: list[int] = []
+    for token in payload.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            vks.append(int(token))
+        except ValueError:
+            log.warning("Ignoring non-numeric token in chord %r: %r", serialized, token)
+    if not vks:
+        return CTRL_ALT_CHORD
+    return tuple((vk,) for vk in vks)
+
+
+def format_vk_chord(vk_codes: tuple[int, ...]) -> str:
+    """Serialize a flat tuple of VK codes into the `"vk:N,N,N"` form.
+
+    Order is preserved as given; callers that want a canonical order
+    should sort before calling.
+    """
+    return "vk:" + ",".join(str(int(v)) for v in vk_codes)
+
+
+# Friendly-name table for the common chord-component VKs. Keys not in
+# this table fall back to `VK_<hex>` so the user always sees *something*
+# legible instead of an opaque integer.
+_VK_FRIENDLY_NAMES: dict[int, str] = {
+    VK_LCONTROL: "Ctrl",  VK_RCONTROL: "Ctrl",
+    VK_LMENU:    "Alt",   VK_RMENU:    "Alt",
+    VK_LSHIFT:   "Shift", VK_RSHIFT:   "Shift",
+    VK_LWIN:     "Win",   VK_RWIN:     "Win",
+    VK_SPACE:    "Space",
+}
+
+
+def chord_display_name(name: str) -> str:
+    """Return a human-readable label for either a preset or a vk: chord.
+
+    For preset names, returns the preset itself (the Settings panel's
+    HOTKEY_LABELS map provides nicer display strings — this helper
+    handles the vk: case specifically). For vk: chords, friendly names
+    are de-duplicated so Ctrl + Ctrl + Alt (left + right + alt) prints
+    as "Ctrl + Alt".
+    """
+    normalized = name.strip().lower().replace(" ", "")
+    if not normalized.startswith("vk:"):
+        return name
+    chord = parse_vk_chord(normalized)
+    parts: list[str] = []
+    seen: set[str] = set()
+    for group in chord:
+        for vk in group:
+            friendly = _VK_FRIENDLY_NAMES.get(vk, f"VK_{vk:#x}")
+            if friendly not in seen:
+                seen.add(friendly)
+                parts.append(friendly)
+    return " + ".join(parts) if parts else "Custom"
 
 
 # ---------------------------------------------------------------------------
