@@ -449,11 +449,13 @@ class MainPanel(QWidget):
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setFixedWidth(32)
         self.settings_btn.setToolTip("Settings")
+        self.settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.settings_btn.clicked.connect(self.open_settings)
 
         self.close_btn = QPushButton("✕")
         self.close_btn.setFixedWidth(32)
         self.close_btn.setToolTip("Hide panel")
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_btn.clicked.connect(self.hide)
 
         title_bar_layout.addWidget(title)
@@ -499,6 +501,7 @@ class MainPanel(QWidget):
         )
         self.input.returnPressed.connect(self._send_typed)
         self.send_btn = QPushButton("Send")
+        self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.clicked.connect(self._send_typed)
         composer.addWidget(self.input, 1)
         composer.addWidget(self.send_btn)
@@ -547,9 +550,7 @@ class MainPanel(QWidget):
                 QLabel#hint {{ color: {theme.Color.TEXT_DIM}; font-size: 11px; }}
                 QLineEdit {{ background:#0f1218; border:1px solid #2d3340;
                             border-radius:6px; padding:6px 8px; color:#e6e8eb; }}
-                QPushButton {{ background:#2e90fa; border:none; border-radius:6px;
-                              padding:6px 12px; color:white; font-weight:600; }}
-                QPushButton:hover {{ background:#1f7ad8; }}
+                {theme.button_stylesheet()}
                 QLabel.userBubble {{ background:#2e3a4f; padding:8px 10px;
                                     border-radius:10px; }}
                 QLabel.assistantBubble {{ background:#0f3a52; padding:8px 10px;

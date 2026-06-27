@@ -12,7 +12,7 @@ commit updates `CLAUDE.md`.
 - [x] Status row bound to state (dot + label + pulse)
 - [x] Mic level waveform meter while listening
 - [x] Streaming reply area fills token-by-token
-- [ ] Hover states + pointer cursor on all buttons
+- [x] Hover states + pointer cursor on all buttons
 - [ ] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
 
 ## Cursor overlay

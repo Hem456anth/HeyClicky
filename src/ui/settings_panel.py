@@ -1,7 +1,7 @@
 """Settings dialog: Worker URL, model, hotkey, modes, autostart, diagnostics."""
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -25,6 +25,7 @@ from ..utils.win32 import (
     enable_autostart,
     is_autostart_enabled,
 )
+from . import theme
 
 
 class SettingsPanel(QDialog):
@@ -56,6 +57,10 @@ class SettingsPanel(QDialog):
         super().__init__(parent)
         self.setWindowTitle("HeyBuddy Settings")
         self.config = config
+        # Apply the shared button styling so the dialog's buttons (including
+        # the auto-created Save/Cancel from QDialogButtonBox) look like the
+        # ones in MainPanel and respond to hover / press.
+        self.setStyleSheet(theme.button_stylesheet())
 
         form = QFormLayout()
 
@@ -67,6 +72,7 @@ class SettingsPanel(QDialog):
         self.ping_btn.setToolTip(
             "POST /transcribe-token to verify the Worker is reachable."
         )
+        self.ping_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ping_btn.clicked.connect(self._ping_worker)
         worker_row.addWidget(self.ping_btn)
         form.addRow("Worker URL", worker_row)
@@ -116,6 +122,7 @@ class SettingsPanel(QDialog):
         self.mic_btn.setToolTip(
             "Record half a second and report whether anything came through."
         )
+        self.mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.mic_btn.clicked.connect(self._test_microphone)
         form.addRow("Diagnostics", self.mic_btn)
 
@@ -130,6 +137,11 @@ class SettingsPanel(QDialog):
         )
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        # Save/Cancel are auto-created by QDialogButtonBox, so we can't
+        # setCursor at construction. Iterate the box's children and stamp
+        # the pointer cursor on each one — matches the rest of the app.
+        for button in buttons.buttons():
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)

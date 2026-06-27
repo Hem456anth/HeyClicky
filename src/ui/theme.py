@@ -188,6 +188,30 @@ class Typography:
 # ---------------------------------------------------------------------------
 
 
+def button_stylesheet() -> str:
+    """CSS for `QPushButton` + `:hover` + `:pressed`, composed from tokens.
+
+    Single source of truth so every button across the app looks identical
+    and re-themes in one place. Returned as a string so callers can paste
+    it into a parent widget's `setStyleSheet(...)` alongside their own
+    rules — the panel does this to fold button styling into its larger
+    chrome stylesheet, while the Settings dialog applies it standalone.
+    """
+    return (
+        f"QPushButton {{ "
+        f"background: {Color.ACCENT}; "
+        f"border: none; "
+        f"border-radius: {Radius.SMALL}px; "
+        f"padding: {Spacing.SM}px {Spacing.LG}px; "
+        f"color: {Color.TEXT_INVERTED}; "
+        f"font-weight: 600; "
+        f"}} "
+        f"QPushButton:hover {{ background: {Color.ACCENT_HOVER}; }} "
+        f"QPushButton:pressed {{ background: {Color.ACCENT_PRESSED}; }} "
+        f"QPushButton:disabled {{ background: {Color.BG_BORDER}; color: {Color.TEXT_DIM}; }} "
+    )
+
+
 def rgba(hex_color: str, alpha_0_to_255: int) -> str:
     """Compose a `rgba(R,G,B,A)` CSS string from a `#RRGGBB` token + alpha.
 
