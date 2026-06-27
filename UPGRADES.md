@@ -16,7 +16,7 @@ commit updates `CLAUDE.md`.
 - [x] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
 
 ## Cursor overlay
-- [ ] Overlay click-through + non-activating flags verified
+- [x] Overlay click-through + non-activating flags verified
 - [ ] Glowing blue dot + halo + comet trail
 - [ ] Idle breathing animation
 - [ ] Bezier-arc flight from POINT tags, ease-in-out

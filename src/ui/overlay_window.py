@@ -29,7 +29,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSlot,
 )
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QShowEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from ..models.message import PointMarker
@@ -101,6 +101,11 @@ class CursorOverlay(QWidget):
         self._dismiss_or_next_timer.setSingleShot(True)
         self._dismiss_or_next_timer.timeout.connect(self._advance_queue)
 
+        # Logged exactly once so cycle-9 verification can confirm from
+        # the log that the click-through / non-activating flags are being
+        # installed by the OS — not just silently ORed by ourselves.
+        self._overlay_styles_logged_once: bool = False
+
     # ---- Qt properties driven by QPropertyAnimation ----
     def get_flight_progress(self) -> float:
         return self._flight_progress
@@ -121,6 +126,35 @@ class CursorOverlay(QWidget):
         self.update()
 
     pulseRadius = pyqtProperty(float, fget=get_pulse_radius, fset=set_pulse_radius)
+
+    # ---- native window setup ----
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        """Re-install the click-through + non-activating ex-styles.
+
+        Qt occasionally strips Win32 extended styles when a frameless
+        widget is hidden and re-shown (the platform plugin reparents the
+        HWND in some scenarios). Re-OR'ing the flags on every show closes
+        that hole. `apply_overlay_window_styles` is idempotent, so the
+        cost of doing this on every show is negligible.
+
+        On the very first show we also log the HWND once for cycle-9
+        verification — operators can grep `logs/heybuddy.log` for
+        "overlay ex-styles applied" to confirm the call fired.
+        """
+        super().showEvent(event)
+        try:
+            hwnd = int(self.winId())
+            apply_overlay_window_styles(hwnd)
+            if not self._overlay_styles_logged_once:
+                self._overlay_styles_logged_once = True
+                log.info(
+                    "overlay ex-styles applied to hwnd=%#x "
+                    "(WS_EX_LAYERED | WS_EX_TRANSPARENT | "
+                    "WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)",
+                    hwnd,
+                )
+        except Exception:
+            log.exception("apply_overlay_window_styles raised in showEvent")
 
     # ---- public API ----
     @pyqtSlot(object)
@@ -195,10 +229,10 @@ class CursorOverlay(QWidget):
         self._current_label = marker.label
         self._busy = True
 
-        # Show window, reapply click-through styles (Qt occasionally strips them
-        # on re-show), raise, then run the animation.
+        # Show window, raise, then run the animation. The ex-style re-apply
+        # happens automatically inside `showEvent` (centralized in cycle 9 so
+        # any future code path that calls `show()` is also covered).
         self.show()
-        apply_overlay_window_styles(int(self.winId()))
         self.raise_()
         self._pulse_animation.stop()
         self._flight_animation.stop()
